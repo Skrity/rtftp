@@ -485,6 +485,81 @@ impl Tftp {
         Ok(())
     }
 
+    pub fn send_slice(&self, socket: &UdpSocket, slice: &[u8]) -> Result<(), io::Error> {
+        let mut block_nr: u16 = 1;
+        let mut transferred = 0;
+        let mut prog_update = 0;
+        let tsize = slice.len() as u64;
+
+        /* holds bytes from netascii conversion that did not fit in tx buffer */
+        let mut overflow = Vec::with_capacity(2 * self.options.blksize);
+
+        let mut reader = io::Cursor::new(slice);
+        loop {
+            let mut filebuf = vec![0; self.options.blksize - overflow.len()];
+            let mut len = match self.read_exact(&mut reader, &mut filebuf) {
+                Ok(n) => n,
+                Err(err) => {
+                    self.send_error(socket, 0, "File reading error")?;
+                    return Err(err);
+                }
+            };
+
+            /* take care of netascii conversion */
+            let mut databuf = filebuf[0..len].to_vec();
+            match self.mode {
+                Mode::OCTET => {}
+                Mode::NETASCII => {
+                    overflow.extend(octet_to_netascii(&databuf));
+                    databuf = overflow.clone();
+                    if overflow.len() > self.options.blksize {
+                        overflow = databuf.split_off(self.options.blksize);
+                    } else {
+                        overflow.clear();
+                    }
+                    len = databuf.len();
+                }
+            }
+
+            let mut sendbuf = Vec::with_capacity(4 + len);
+            sendbuf.extend((Opcode::DATA as u16).to_be_bytes().iter());
+            sendbuf.extend(block_nr.to_be_bytes().iter());
+            sendbuf.extend(databuf.iter());
+
+            let mut acked = false;
+            for _ in 1..5 {
+                /* try a couple of times to send data, in case of timeouts
+                or re-ack of previous data */
+                socket.send(&sendbuf)?;
+                match self.wait_for_ack(socket, block_nr) {
+                    Ok(true) => {
+                        acked = true;
+                        break;
+                    }
+                    Ok(false) => continue,
+                    Err(e) => return Err(e),
+                };
+            }
+            if !acked {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "ack timeout"));
+            }
+
+            transferred += len as u64;
+            if let Some(cb) = self.progress_cb {
+                prog_update = cb(transferred, tsize, prog_update);
+            }
+
+            if len < self.options.blksize {
+                /* this was the last block */
+                break;
+            }
+
+            /* increment with rollover on overflow */
+            block_nr = block_nr.wrapping_add(1);
+        }
+        Ok(())
+    }
+
     pub fn recv_file(&self, sock: &UdpSocket, file: &mut File) -> Result<(), io::Error> {
         let mut block_nr: u16 = 1;
         let mut prog_update = 0;
