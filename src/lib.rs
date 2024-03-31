@@ -17,7 +17,7 @@ pub static VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
 /// * `total` - total number of bytes; 0 if unknown
 /// * `state` - state that was returned in previous call
 /// Returns state that should get passed in next invocation
-type ProgressCallback = fn(cur: u64, total: u64, state: u64) -> u64;
+type ProgressCallback = Box<dyn Fn(u64, u64, u64) -> u64>;
 
 #[repr(u16)]
 pub enum Opcode {
@@ -54,7 +54,7 @@ impl Default for TftpOptions {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 pub struct Tftp {
     options: TftpOptions,
     mode: Mode,
@@ -125,8 +125,8 @@ impl Tftp {
             total_size += size as u64;
             /* each \r and \n will take two bytes in netascii output */
             total_size += buf[0..size].iter()
-                                      .filter(|&x| *x == b'\r' || *x == b'\n')
-                                      .count() as u64;
+                .filter(|&x| *x == b'\r' || *x == b'\n')
+                .count() as u64;
         }
         reader.seek(io::SeekFrom::Start(0))?;
 
@@ -454,7 +454,7 @@ impl Tftp {
             let mut acked = false;
             for _ in 1..5 {
                 /* try a couple of times to send data, in case of timeouts
-                   or re-ack of previous data */
+                or re-ack of previous data */
                 socket.send(&sendbuf)?;
                 match self.wait_for_ack(socket, block_nr) {
                     Ok(true) => {
@@ -470,7 +470,7 @@ impl Tftp {
             }
 
             transferred += len as u64;
-            if let Some(cb) = self.progress_cb {
+            if let Some(cb) = &self.progress_cb {
                 prog_update = cb(transferred, tsize, prog_update);
             }
 
@@ -545,7 +545,7 @@ impl Tftp {
             }
 
             transferred += len as u64;
-            if let Some(cb) = self.progress_cb {
+            if let Some(cb) = &self.progress_cb {
                 prog_update = cb(transferred, tsize, prog_update);
             }
 
@@ -611,7 +611,7 @@ impl Tftp {
             file.write_all(&databuf)?;
 
             transferred += (len - 4) as u64;
-            if let Some(cb) = self.progress_cb {
+            if let Some(cb) = &self.progress_cb {
                 prog_update = cb(transferred, tsize, prog_update);
             }
 
